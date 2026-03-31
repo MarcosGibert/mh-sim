@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MH MCMC Visualizer</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { margin: 0; background: #0f172a; display: flex; justify-content: center; padding: 24px 0; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // --- Math helpers ---
+    const gauss = (x, mu, sigma) =>
+      Math.exp(-0.5 * ((x - mu) / sigma) ** 2) / (sigma * Math.sqrt(2 * Math.PI));
+
+    const targetDist = (x) => 0.45 * gauss(x, -2.5, 1.0) + 0.55 * gauss(x, 2.0, 0.9);
+
+    const SIGMA_PROP = 1.8;
+    const proposalDist = (x, center) => gauss(x, center, SIGMA_PROP);
+
+    const sampleNormal = (mu, sigma) => {
+      const u1 = Math.random(), u2 = Math.random();
+      return mu + sigma * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    };
+
+    const SVG_W = 560, SVG_H = 210;
+    const PAD = { l: 45, r: 20, t: 22, b: 30 };
+    const PLOT_W = SVG_W - PAD.l - PAD.r;
+    const PLOT_H = SVG_H - PAD.t - PAD.b;
+    const X_MIN = -7, X_MAX = 6.5;
+    const N_PTS = 300;
+
+    const xs = Array.from({ length: N_PTS }, (_, i) => X_MIN + (X_MAX - X_MIN) * i / (N_PTS - 1));
+    const targetYs = xs.map(targetDist);
+    const maxTarget = Math.max(...targetYs);
+
+    const toSvgX = (x) => PAD.l + (x - X_MIN) / (X_MAX - X_MIN) * PLOT_W;
+    const toSvgY = (y, maxY, svgH = SVG_H) =>
+      PAD.t + (svgH - PAD.t - PAD.b) - y / maxY * (svgH - PAD.t - PAD.b);
+
+    const makePath = (ys, maxY = maxTarget, svgH = SVG_H) =>
+      xs.map((x, i) => `${i === 0 ? "M" : "L"}${toSvgX(x).toFixed(1)},${toSvgY(ys[i], maxY, svgH).toFixed(1)}`).join(" ");
+
+    const BINS = 35;
+    const buildHist = (chain) => {
+      const hist = Array(BINS).fill(0);
+      chain.forEach((v) => {
+        const b = Math.floor((v - X_MIN) / (X_MAX - X_MIN) * BINS);
+        if (b >= 0 && b < BINS) hist[b]++;
+      });
+      return hist;
+    };
+
+    function MHVisualizer() {
+      const [current, setCurrent] = useState(-2.5);
+      const [proposed, setProposed] = useState(null);
+      const [alpha, setAlpha] = useState(null);
+      const [uVal, setUVal] = useState(null);
+      const [accepted, setAccepted] = useState(null);
+      const [chain, setChain] = useState([-2.5]);
+      const [phase, setPhase] = useState("idle");
+      const [iter, setIter] = useState(0);
+      const [autoRun, setAutoRun] = useState(false);
+      const autoRef = useRef(false);
+
+      const proposeStep = useCallback((cur = current) => {
+        const prop = sampleNormal(cur, SIGMA_PROP);
+        const ratio = targetDist(prop) / targetDist(cur);
+        const a = Math.min(1, ratio);
+        setProposed(prop);
+        setAlpha(a);
+        setUVal(null);
+        setAccepted(null);
+        setPhase("proposed");
+      }, [current]);
+
+      const decideStep = useCallback(() => {
+        const u = Math.random();
+        const acc = u <= alpha;
+        setUVal(u);
+        setAccepted(acc);
+        const next = acc ? proposed : current;
+        setCurrent(next);
+        setChain((prev) => [...prev.slice(-499), next]);
+        setIter((i) => i + 1);
+        setPhase("decided");
+      }, [alpha, proposed, current]);
+
+      const nextStep = useCallback(() => {
+        if (phase === "idle" || phase === "decided") proposeStep();
+        else if (phase === "proposed") decideStep();
+      }, [phase, proposeStep, decideStep]);
+
+      useEffect(() => { autoRef.current = autoRun; }, [autoRun]);
+
+      useEffect(() => {
+        if (!autoRun) return;
+        const id = setInterval(() => { if (autoRef.current) nextStep(); }, 220);
+        return () => clearInterval(id);
+      }, [autoRun, nextStep]);
+
+      const reset = () => {
+        setAutoRun(false);
+        setCurrent(-2.5);
+        setProposed(null);
+        setAlpha(null);
+        setUVal(null);
+        setAccepted(null);
+        setChain([-2.5]);
+        setPhase("idle");
+        setIter(0);
+      };
+
+      const propYs = proposed !== null ? xs.map((x) => proposalDist(x, current) * 0.45) : null;
+      const hist = buildHist(chain);
+      const maxHist = Math.max(...hist, 1);
+      const HIST_H = 130;
+      const barW = PLOT_W / BINS;
+      const trace = chain.slice(-150);
+      const TRACE_H = 80;
+
+      const C = {
+        bg: "#0f172a", panel: "#1e293b", border: "#334155", text: "#e2e8f0",
+        muted: "#94a3b8", target: "#60a5fa", proposal: "#fbbf24",
+        current: "#34d399", proposed: "#f87171", accepted: "#a78bfa", rejected: "#f87171",
+      };
+
+      const propColor = accepted === null ? C.proposed : accepted ? C.accepted : C.rejected;
+      const axisXTicks = [-6, -4, -2, 0, 2, 4, 6];
+
+      return (
+        <div style={{ fontFamily: "'Segoe UI', sans-serif", background: C.bg, color: C.text, maxWidth: 600, margin: "0 auto", padding: 18, borderRadius: 14 }}>
+          <h2 style={{ textAlign: "center", color: C.target, fontSize: 17, marginBottom: 4, letterSpacing: 0.3 }}>
+            Metropolis-Hastings MCMC — Interactive Visualizer
+          </h2>
+          <p style={{ textAlign: "center", color: C.muted, fontSize: 12, margin: "0 0 12px" }}>
+            Target: bimodal mixture · Proposal: Normal(π<sup>(t)</sup>, σ={SIGMA_PROP})
+          </p>
+
+          <svg width={SVG_W} height={SVG_H} style={{ display: "block", margin: "0 auto", overflow: "visible" }}>
+            <path d={makePath(targetYs) + ` L${toSvgX(X_MAX)},${SVG_H - PAD.b} L${toSvgX(X_MIN)},${SVG_H - PAD.b} Z`} fill="rgba(96,165,250,0.12)" stroke="none" />
+            <path d={makePath(targetYs)} fill="none" stroke={C.target} strokeWidth={2} />
+            {propYs && (
+              <>
+                <path d={makePath(propYs) + ` L${toSvgX(X_MAX)},${SVG_H - PAD.b} L${toSvgX(X_MIN)},${SVG_H - PAD.b} Z`} fill="rgba(251,191,36,0.08)" />
+                <path d={makePath(propYs)} fill="none" stroke={C.proposal} strokeWidth={1.5} strokeDasharray="5,3" />
+              </>
+            )}
+            {proposed !== null && (
+              <>
+                <line x1={toSvgX(proposed)} y1={PAD.t} x2={toSvgX(proposed)} y2={SVG_H - PAD.b} stroke={propColor} strokeWidth={2} strokeDasharray={accepted === false ? "5,3" : "none"} />
+                <circle cx={toSvgX(proposed)} cy={toSvgY(targetDist(proposed), maxTarget)} r={7} fill={propColor} />
+                <text x={toSvgX(proposed)} y={PAD.t - 6} textAnchor="middle" fill={propColor} fontSize={11} fontWeight="bold">π⁽ᵖʳᵒᵖ⁾</text>
+              </>
+            )}
+            <line x1={toSvgX(current)} y1={PAD.t} x2={toSvgX(current)} y2={SVG_H - PAD.b} stroke={C.current} strokeWidth={2.5} />
+            <circle cx={toSvgX(current)} cy={toSvgY(targetDist(current), maxTarget)} r={7} fill={C.current} />
+            <text x={toSvgX(current)} y={PAD.t - 6} textAnchor="middle" fill={C.current} fontSize={11} fontWeight="bold">π⁽ᵗ⁾</text>
+            <line x1={PAD.l} y1={SVG_H - PAD.b} x2={PAD.l + PLOT_W} y2={SVG_H - PAD.b} stroke={C.border} />
+            <line x1={PAD.l} y1={PAD.t} x2={PAD.l} y2={SVG_H - PAD.b} stroke={C.border} />
+            {axisXTicks.map((x) => (
+              <g key={x}>
+                <line x1={toSvgX(x)} y1={SVG_H - PAD.b} x2={toSvgX(x)} y2={SVG_H - PAD.b + 4} stroke={C.border} />
+                <text x={toSvgX(x)} y={SVG_H - PAD.b + 15} textAnchor="middle" fill={C.muted} fontSize={10}>{x}</text>
+              </g>
+            ))}
+            <text x={PAD.l - 8} y={PAD.t + 4} textAnchor="end" fill={C.muted} fontSize={9}>p*(π)</text>
+            <line x1={PAD.l + 5} y1={PAD.t + 8} x2={PAD.l + 22} y2={PAD.t + 8} stroke={C.target} strokeWidth={2} />
+            <text x={PAD.l + 25} y={PAD.t + 12} fill={C.muted} fontSize={10}>Target p*(π)</text>
+            {propYs && (
+              <>
+                <line x1={PAD.l + 5} y1={PAD.t + 22} x2={PAD.l + 22} y2={PAD.t + 22} stroke={C.proposal} strokeWidth={1.5} strokeDasharray="4,3" />
+                <text x={PAD.l + 25} y={PAD.t + 26} fill={C.muted} fontSize={10}>Proposal q(π|π⁽ᵗ⁾)</text>
+              </>
+            )}
+          </svg>
+
+          <div style={{ background: C.panel, borderRadius: 8, padding: "10px 14px", margin: "10px 0", fontSize: 13, border: `1px solid ${C.border}` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", color: C.muted, fontSize: 12, marginBottom: 6 }}>
+              <span>Iteration: <b style={{ color: C.text }}>{iter}</b></span>
+              <span>Samples collected: <b style={{ color: C.text }}>{chain.length}</b></span>
+            </div>
+            {phase === "idle" && (
+              <div style={{ color: C.muted, textAlign: "center", padding: "6px 0" }}>
+                Press <b style={{ color: C.target }}>Propose</b> to begin the algorithm.
+              </div>
+            )}
+            {(phase === "proposed" || phase === "decided") && proposed !== null && (
+              <div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+                  <div style={{ background: "#0f172a", borderRadius: 6, padding: "6px 10px", borderLeft: `3px solid ${C.current}` }}>
+                    <div style={{ color: C.muted, fontSize: 11 }}>Current π⁽ᵗ⁾</div>
+                    <div style={{ color: C.current, fontWeight: "bold", fontSize: 14 }}>{current.toFixed(3)}</div>
+                    <div style={{ color: C.muted, fontSize: 11 }}>p* = {targetDist(current).toFixed(5)}</div>
+                  </div>
+                  <div style={{ background: "#0f172a", borderRadius: 6, padding: "6px 10px", borderLeft: `3px solid ${propColor}` }}>
+                    <div style={{ color: C.muted, fontSize: 11 }}>Proposed π⁽ᵖʳᵒᵖ⁾</div>
+                    <div style={{ color: propColor, fontWeight: "bold", fontSize: 14 }}>{proposed.toFixed(3)}</div>
+                    <div style={{ color: C.muted, fontSize: 11 }}>p* = {targetDist(proposed).toFixed(5)}</div>
+                  </div>
+                </div>
+                <div style={{ background: "#0f172a", borderRadius: 6, padding: "8px 12px", fontFamily: "monospace", fontSize: 12, marginBottom: 6 }}>
+                  <span style={{ color: C.muted }}>α = min(1, p*(π⁽ᵖʳᵒᵖ⁾) / p*(π⁽ᵗ⁾)) = min(1, {(targetDist(proposed) / targetDist(current)).toFixed(4)}) = </span>
+                  <span style={{ color: C.proposal, fontWeight: "bold", fontSize: 14 }}>{alpha.toFixed(4)}</span>
+                  {alpha === 1 && <span style={{ color: "#86efac", marginLeft: 6, fontSize: 11 }}>← proposal is better! always accept</span>}
+                </div>
+                {uVal !== null && (
+                  <div style={{ background: "#0f172a", borderRadius: 6, padding: "8px 12px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                    <span style={{ color: C.muted, fontFamily: "monospace", fontSize: 12 }}>
+                      u ~ U(0,1) = <b style={{ color: C.text }}>{uVal.toFixed(4)}</b>
+                    </span>
+                    <span style={{ color: C.muted, fontSize: 12 }}>
+                      {uVal <= alpha
+                        ? <><b style={{ color: C.text }}>{uVal.toFixed(4)}</b> ≤ <b style={{ color: C.proposal }}>{alpha.toFixed(4)}</b> (u ≤ α)</>
+                        : <><b style={{ color: C.text }}>{uVal.toFixed(4)}</b> &gt; <b style={{ color: C.proposal }}>{alpha.toFixed(4)}</b> (u &gt; α)</>
+                      }
+                    </span>
+                    <span style={{ fontWeight: "bold", fontSize: 15, color: accepted ? C.accepted : C.rejected, background: accepted ? "rgba(167,139,250,0.15)" : "rgba(248,113,113,0.15)", borderRadius: 6, padding: "2px 10px" }}>
+                      {accepted ? "✓ ACCEPTED" : "✗ REJECTED"}
+                    </span>
+                  </div>
+                )}
+                {phase === "proposed" && uVal === null && (
+                  <div style={{ color: C.muted, fontSize: 12, textAlign: "center", paddingTop: 4 }}>
+                    Press <b style={{ color: C.proposal }}>Decide</b> to draw u and accept/reject.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div style={{ color: C.muted, fontSize: 12, marginBottom: 4 }}>Sample histogram vs. true target (blue curve):</div>
+          <svg width={SVG_W} height={HIST_H} style={{ display: "block", margin: "0 auto", overflow: "visible" }}>
+            {hist.map((count, i) => {
+              const bH = (count / maxHist) * (HIST_H - PAD.t - PAD.b);
+              return <rect key={i} x={PAD.l + i * barW} y={HIST_H - PAD.b - bH} width={barW - 0.8} height={bH} fill="rgba(100,180,255,0.55)" />;
+            })}
+            <path
+              d={xs.map((x, i) => {
+                const y = HIST_H - PAD.b - (targetYs[i] / maxTarget) * (HIST_H - PAD.t - PAD.b) * 0.92;
+                return `${i === 0 ? "M" : "L"}${toSvgX(x).toFixed(1)},${y.toFixed(1)}`;
+              }).join(" ")}
+              fill="none" stroke={C.target} strokeWidth={1.8} opacity={0.8}
+            />
+            <line x1={PAD.l} y1={HIST_H - PAD.b} x2={PAD.l + PLOT_W} y2={HIST_H - PAD.b} stroke={C.border} />
+            {axisXTicks.map((x) => (
+              <text key={x} x={toSvgX(x)} y={HIST_H - PAD.b + 14} textAnchor="middle" fill={C.muted} fontSize={10}>{x}</text>
+            ))}
+          </svg>
+
+          <div style={{ color: C.muted, fontSize: 12, margin: "10px 0 4px" }}>Chain trace (last {Math.min(chain.length, 150)} steps):</div>
+          <svg width={SVG_W} height={TRACE_H} style={{ display: "block", margin: "0 auto", overflow: "visible" }}>
+            {trace.length > 1 && (
+              <polyline
+                points={trace.map((v, i) => {
+                  const px = PAD.l + (i / (trace.length - 1)) * PLOT_W;
+                  const py = PAD.t + (TRACE_H - PAD.t - PAD.b) * (1 - (v - X_MIN) / (X_MAX - X_MIN));
+                  return `${px.toFixed(1)},${py.toFixed(1)}`;
+                }).join(" ")}
+                fill="none" stroke="#60a5fa" strokeWidth={1.2} opacity={0.85}
+              />
+            )}
+            {trace.length > 0 && (() => {
+              const last = trace[trace.length - 1];
+              const px = PAD.l + PLOT_W;
+              const py = PAD.t + (TRACE_H - PAD.t - PAD.b) * (1 - (last - X_MIN) / (X_MAX - X_MIN));
+              return <circle cx={px} cy={py} r={4} fill={C.current} />;
+            })()}
+            <line x1={PAD.l} y1={TRACE_H - PAD.b} x2={PAD.l + PLOT_W} y2={TRACE_H - PAD.b} stroke={C.border} />
+            <line x1={PAD.l} y1={PAD.t} x2={PAD.l} y2={TRACE_H - PAD.b} stroke={C.border} />
+            {[-4, -2, 0, 2, 4].map((v) => {
+              const py = PAD.t + (TRACE_H - PAD.t - PAD.b) * (1 - (v - X_MIN) / (X_MAX - X_MIN));
+              return (
+                <g key={v}>
+                  <line x1={PAD.l - 3} y1={py} x2={PAD.l} y2={py} stroke={C.border} />
+                  <text x={PAD.l - 5} y={py + 3.5} textAnchor="end" fill={C.muted} fontSize={9}>{v}</text>
+                </g>
+              );
+            })}
+            <text x={PAD.l - 8} y={PAD.t} textAnchor="end" fill={C.muted} fontSize={9}>π</text>
+            <text x={PAD.l + PLOT_W / 2} y={TRACE_H - 2} textAnchor="middle" fill={C.muted} fontSize={9}>← steps →</text>
+          </svg>
+
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 14, flexWrap: "wrap" }}>
+            <button onClick={nextStep} disabled={autoRun} style={{ background: phase === "proposed" ? "#d97706" : "#3b82f6", color: "white", border: "none", padding: "9px 22px", borderRadius: 7, cursor: autoRun ? "not-allowed" : "pointer", fontSize: 13, fontWeight: "bold", opacity: autoRun ? 0.4 : 1, minWidth: 90 }}>
+              {phase === "proposed" ? "Decide" : "Propose"}
+            </button>
+            <button onClick={() => setAutoRun((a) => !a)} style={{ background: autoRun ? "#dc2626" : "#059669", color: "white", border: "none", padding: "9px 22px", borderRadius: 7, cursor: "pointer", fontSize: 13, fontWeight: "bold", minWidth: 110 }}>
+              {autoRun ? "⏹ Stop" : "▶ Auto Run"}
+            </button>
+            <button onClick={reset} style={{ background: "#475569", color: "white", border: "none", padding: "9px 22px", borderRadius: 7, cursor: "pointer", fontSize: 13 }}>
+              ↺ Reset
+            </button>
+          </div>
+
+          <p style={{ textAlign: "center", color: C.muted, fontSize: 11, marginTop: 10 }}>
+            <b style={{ color: C.current }}>Green</b> = current · <b style={{ color: C.accepted }}>Purple</b> = accepted · <b style={{ color: C.rejected }}>Red</b> = rejected
+          </p>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<MHVisualizer />);
+  </script>
+</body>
+</html>
